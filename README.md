@@ -13,6 +13,11 @@
 
 本项目通过浏览器自动化技术访问该页面，将请求转发到 Cursor API，并将响应转换为标准的 OpenAI/Anthropic API 格式。
 
+**⚠️ 重要说明：** Cursor 文档页的 AI 助手基于 Inkeep 技术（类似 Claude Docs），是一个**只读的文档问答系统**，不支持原生的工具调用（Tool Use）。这意味着：
+- ❌ AI 无法直接执行命令或写入文件
+- ❌ 不支持 Anthropic 原生的 `tool_use` 协议
+- ✅ 本项目通过**自动执行模式**解决此限制（见下方说明）
+
 ## 功能特性
 
 - **Anthropic Messages API** - 完整支持 `/v1/messages` 接口
