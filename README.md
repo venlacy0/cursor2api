@@ -382,9 +382,11 @@ curl http://localhost:3010/tools/execute \
 
 | 请求模型 | 映射到 Cursor |
 |---------|--------------|
-| claude-* | anthropic/claude-sonnet-4.5 |
-| gpt-* | openai/gpt-5-nano |
-| gemini-* | google/gemini-2.5-flash |
+| claude-* | claude-4.5-sonnet |
+| claude-opus-4-* | claude-4.5-opus |
+| gpt-* | gpt-5.2 |
+| gemini-* | gemini-3-flash |
+| gemini-*-pro | gemini-3-pro |
 
 ## MCP 服务器
 
