@@ -28,8 +28,8 @@ type ChatCompletionRequest struct {
 
 // OpenAIMessage OpenAI 消息格式
 type OpenAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 // ChatCompletionResponse OpenAI Chat Completion 响应格式
