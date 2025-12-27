@@ -255,7 +255,7 @@ Object.defineProperties(window.Navigator.prototype, {
     },
     hardwareConcurrency: {
         configurable: true, enumerable: true, get: antiToString(function get() {
-            return 32;
+            return 50;
         }),
     },
     cookieEnabled: {
@@ -7444,5 +7444,4 @@ contentWindow.console = {
 
 
 new_toggle = false;
-
 

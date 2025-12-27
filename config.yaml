@@ -24,4 +24,4 @@ fingerprint:
 models: "gpt-4o,claude-3.5-sonnet,claude-3.7-sonnet,claude-4-sonnet,gemini-2.5-pro"
 
 # Token 轮询池大小（每次请求轮流使用不同 token，分散限流压力）
-token_pool_size: 10
+token_pool_size: 50
