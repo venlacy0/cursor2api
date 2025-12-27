@@ -25,6 +25,8 @@ type Pool struct {
 	nameMap    map[string]string      // apiKey -> name (用于显示)
 	roundRobin []*TokenEntry          // 轮询 token 池
 	rrIndex    int32                  // 轮询索引
+	tokenQueue chan *TokenEntry       // 单次消费 token 队列
+	refillCh   chan struct{}          // 异步补充信号
 	client     *surf.Client
 	cfg        *config.Config
 	mu         sync.RWMutex
@@ -97,28 +99,33 @@ func (p *Pool) init() {
 	}
 	p.mainJS = string(mainJS)
 
-	// 预生成轮询 token 池
-	log.Info("预热 %d 个 token...", p.poolSize)
-	for i := 0; i < p.poolSize; i++ {
-		tokenStr, err := p.generateToken()
-		if err != nil {
-			log.Error("预热 token %d 失败: %v", i+1, err)
-			continue
+	if p.cfg.UseTokenPool {
+		p.tokenQueue = make(chan *TokenEntry, p.poolSize)
+		p.refillCh = make(chan struct{}, p.poolSize)
+
+		log.Info("预热 %d 个 token...", p.poolSize)
+		for i := 0; i < p.poolSize; i++ {
+			tokenStr, err := p.generateToken()
+			if err != nil {
+				log.Error("预热 token %d 失败: %v", i+1, err)
+				continue
+			}
+			name := p.generateName()
+			entry := &TokenEntry{
+				Name:      name,
+				Token:     tokenStr,
+				CreatedAt: time.Now(),
+			}
+			p.tokenQueue <- entry
+			log.Info("预热 %s 完成 (%d/%d)", name, i+1, p.poolSize)
 		}
-		name := p.generateName()
-		entry := &TokenEntry{
-			Name:      name,
-			Token:     tokenStr,
-			CreatedAt: time.Now(),
-		}
-		p.roundRobin = append(p.roundRobin, entry)
-		log.Info("预热 %s 完成 (%d/%d)", name, i+1, p.poolSize)
+
+		go p.refillLoop()
+		log.Info("Initialized (token queue: %d)", len(p.tokenQueue))
+		return
 	}
 
-	// 启动后台刷新协程
-	go p.backgroundRefresh()
-
-	log.Info("Initialized (轮询池: %d)", len(p.roundRobin))
+	log.Info("Initialized (token pool disabled)")
 }
 
 // preWarmToken 预热 token
@@ -186,6 +193,8 @@ func (p *Pool) GetToken(apiKey string) (string, error) {
 		}
 		if err != nil {
 			log.Warn("从 Token 池获取失败，回退到即时生成: %v", err)
+			atomic.AddInt64(&p.missCount, 1)
+			p.requestRefill()
 		}
 	}
 
@@ -203,38 +212,64 @@ func (p *Pool) GetToken(apiKey string) (string, error) {
 }
 
 func (p *Pool) getTokenFromPool() (string, error) {
-	p.mu.RLock()
-	poolLen := len(p.roundRobin)
-	p.mu.RUnlock()
-
-	if poolLen == 0 {
-		return "", fmt.Errorf("token pool is empty")
+	if p.tokenQueue == nil {
+		return "", fmt.Errorf("token queue not initialized")
 	}
 
-	idx := int(atomic.AddInt32(&p.rrIndex, 1)-1) % poolLen
-	entry := p.roundRobin[idx]
+	select {
+	case entry := <-p.tokenQueue:
+		if entry == nil {
+			return "", fmt.Errorf("token queue empty")
+		}
+		p.requestRefill()
 
-	entry.mu.Lock()
-	if entry.Token != "" && time.Since(entry.CreatedAt) < tokenExpiry {
-		entry.UseCount++
-		tokenStr := entry.Token
-		entry.mu.Unlock()
+		if entry.Token != "" && time.Since(entry.CreatedAt) < tokenExpiry {
+			entry.UseCount++
+			return entry.Token, nil
+		}
+
+		tokenStr, err := p.generateToken()
+		if err != nil {
+			return "", err
+		}
 		return tokenStr, nil
+	default:
+		return "", fmt.Errorf("token queue empty")
 	}
-	entry.mu.Unlock()
+}
 
-	tokenStr, err := p.generateToken()
-	if err != nil {
-		return "", err
+func (p *Pool) requestRefill() {
+	if p.refillCh == nil {
+		return
 	}
+	select {
+	case p.refillCh <- struct{}{}:
+	default:
+	}
+}
 
-	entry.mu.Lock()
-	entry.Token = tokenStr
-	entry.CreatedAt = time.Now()
-	entry.UseCount++
-	entry.mu.Unlock()
-
-	return tokenStr, nil
+func (p *Pool) refillLoop() {
+	for {
+		select {
+		case <-p.refillCh:
+			tokenStr, err := p.generateToken()
+			if err != nil {
+				log.Error("补充 token 失败: %v", err)
+				continue
+			}
+			entry := &TokenEntry{
+				Name:      p.generateName(),
+				Token:     tokenStr,
+				CreatedAt: time.Now(),
+			}
+			select {
+			case p.tokenQueue <- entry:
+			default:
+			}
+		case <-p.stopChan:
+			return
+		}
+	}
 }
 
 // refreshRoundRobinToken 刷新轮询池中指定索引的 token
