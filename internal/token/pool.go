@@ -30,6 +30,9 @@ type Pool struct {
 	mu         sync.RWMutex
 	envJS      string
 	mainJS     string
+	scriptMu   sync.Mutex
+	scriptCache string
+	scriptCachedAt time.Time
 	stopChan   chan struct{}
 	nextID     int32 // 用于生成 token 名称
 	hitCount   int64 // 缓存命中次数
@@ -175,15 +178,62 @@ func (p *Pool) refreshAllTokens() {
 
 // GetToken 获取 Token（每次生成新 token）
 func (p *Pool) GetToken(apiKey string) (string, error) {
-	// 每次请求生成新 token，避免被 Cursor 检测到重复使用
+	if p.cfg.UseTokenPool {
+		tokenStr, err := p.getTokenFromPool()
+		if err == nil && tokenStr != "" {
+			atomic.AddInt64(&p.hitCount, 1)
+			return tokenStr, nil
+		}
+		if err != nil {
+			log.Warn("从 Token 池获取失败，回退到即时生成: %v", err)
+		}
+	}
+
+	// 回退：即时生成 token
 	log.Debug("生成新 token...")
 	tokenStr, err := p.generateToken()
 	if err != nil {
 		log.Error("生成 token 失败: %v", err)
+		atomic.AddInt64(&p.missCount, 1)
 		return "", err
 	}
 	atomic.AddInt64(&p.hitCount, 1)
 	log.Debug("新 token 生成成功")
+	return tokenStr, nil
+}
+
+func (p *Pool) getTokenFromPool() (string, error) {
+	p.mu.RLock()
+	poolLen := len(p.roundRobin)
+	p.mu.RUnlock()
+
+	if poolLen == 0 {
+		return "", fmt.Errorf("token pool is empty")
+	}
+
+	idx := int(atomic.AddInt32(&p.rrIndex, 1)-1) % poolLen
+	entry := p.roundRobin[idx]
+
+	entry.mu.Lock()
+	if entry.Token != "" && time.Since(entry.CreatedAt) < tokenExpiry {
+		entry.UseCount++
+		tokenStr := entry.Token
+		entry.mu.Unlock()
+		return tokenStr, nil
+	}
+	entry.mu.Unlock()
+
+	tokenStr, err := p.generateToken()
+	if err != nil {
+		return "", err
+	}
+
+	entry.mu.Lock()
+	entry.Token = tokenStr
+	entry.CreatedAt = time.Now()
+	entry.UseCount++
+	entry.mu.Unlock()
+
 	return tokenStr, nil
 }
 
@@ -201,7 +251,7 @@ func (p *Pool) refreshRoundRobinToken(idx int) {
 	defer entry.mu.Unlock()
 
 	// 双重检查
-	if time.Since(entry.CreatedAt) < tokenExpiry {
+	if time.Since(entry.CreatedAt) < tokenExpiry && entry.Token != "" {
 		return
 	}
 
@@ -290,7 +340,7 @@ func (p *Pool) generateToken() (string, error) {
 	}
 
 	// 获取 Cursor 脚本
-	cursorJS, err := p.fetchCursorScript()
+	cursorJS, err := p.getCursorScript()
 	if err != nil {
 		return "", fmt.Errorf("fetch cursor script: %w", err)
 	}
@@ -323,6 +373,34 @@ func (p *Pool) generateToken() (string, error) {
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+func (p *Pool) getCursorScript() (string, error) {
+	ttlSeconds := p.cfg.ScriptCacheTTLSeconds
+	if ttlSeconds > 0 {
+		ttl := time.Duration(ttlSeconds) * time.Second
+		p.scriptMu.Lock()
+		if p.scriptCache != "" && time.Since(p.scriptCachedAt) < ttl {
+			script := p.scriptCache
+			p.scriptMu.Unlock()
+			return script, nil
+		}
+		p.scriptMu.Unlock()
+	}
+
+	script, err := p.fetchCursorScript()
+	if err != nil {
+		return "", err
+	}
+
+	if ttlSeconds > 0 {
+		p.scriptMu.Lock()
+		p.scriptCache = script
+		p.scriptCachedAt = time.Now()
+		p.scriptMu.Unlock()
+	}
+
+	return script, nil
 }
 
 // fetchCursorScript 获取 Cursor 验证脚本
