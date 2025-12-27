@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"strconv"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -30,14 +29,6 @@ type Config struct {
 	Models string `yaml:"models"`
 	// TokenPoolSize Token 轮询池大小
 	TokenPoolSize int `yaml:"token_pool_size"`
-	// UseTokenPool 是否使用预热 Token 池
-	UseTokenPool bool `yaml:"use_token_pool"`
-	// ScriptCacheTTLSeconds Cursor 脚本缓存 TTL（秒）
-	ScriptCacheTTLSeconds int `yaml:"script_cache_ttl_seconds"`
-	// MaxConcurrency 最大并发请求数（<=0 为不限制）
-	MaxConcurrency int `yaml:"max_concurrency"`
-	// MaxQueueWaitMs 获取并发槽位的最大等待时间（毫秒）
-	MaxQueueWaitMs int `yaml:"max_queue_wait_ms"`
 }
 
 // FingerprintConfig 浏览器指纹配置
@@ -59,14 +50,9 @@ var (
 func Get() *Config {
 	once.Do(func() {
 		cfg = &Config{
-			Port:                 "3010",
-			Timeout:              60,
-			Models:               "gpt-4o,claude-3.5-sonnet,claude-3.7-sonnet",
-			TokenPoolSize:        10,
-			UseTokenPool:         true,
-			ScriptCacheTTLSeconds: 300,
-			MaxConcurrency:       20,
-			MaxQueueWaitMs:       2000,
+			Port:    "3010",
+			Timeout: 60,
+			Models:  "gpt-4o,claude-3.5-sonnet,claude-3.7-sonnet",
 			Fingerprint: FingerprintConfig{
 				UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
 			},
@@ -115,26 +101,6 @@ func load(c *Config) {
 	if models := os.Getenv("MODELS"); models != "" {
 		c.Models = models
 	}
-	if v := os.Getenv("USE_TOKEN_POOL"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			c.UseTokenPool = parsed
-		}
-	}
-	if v := os.Getenv("SCRIPT_CACHE_TTL_SECONDS"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			c.ScriptCacheTTLSeconds = parsed
-		}
-	}
-	if v := os.Getenv("MAX_CONCURRENCY"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			c.MaxConcurrency = parsed
-		}
-	}
-	if v := os.Getenv("MAX_QUEUE_WAIT_MS"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			c.MaxQueueWaitMs = parsed
-		}
-	}
 
 	// 输出最终配置
 	log.Printf("[配置] 端口: %s, 超时: %ds", c.Port, c.Timeout)
@@ -144,5 +110,4 @@ func load(c *Config) {
 	if c.XIsHumanServerURL != "" {
 		log.Printf("[配置] XIsHumanServerURL: %s", c.XIsHumanServerURL)
 	}
-	log.Printf("[配置] MaxConcurrency: %d, MaxQueueWaitMs: %d", c.MaxConcurrency, c.MaxQueueWaitMs)
 }

@@ -29,7 +29,7 @@ type ChatCompletionRequest struct {
 // OpenAIMessage OpenAI 消息格式
 type OpenAIMessage struct {
 	Role    string `json:"role,omitempty"`
-	Content any    `json:"content,omitempty"`
+	Content string `json:"content,omitempty"`
 }
 
 // ChatCompletionResponse OpenAI Chat Completion 响应格式
@@ -96,9 +96,8 @@ func ChatCompletions(c *gin.Context) {
 func convertOpenAIToCursor(req ChatCompletionRequest) client.CursorChatRequest {
 	messages := make([]client.CursorMessage, len(req.Messages))
 	for i, msg := range req.Messages {
-		content := getOpenAITextContent(msg.Content)
 		messages[i] = client.CursorMessage{
-			Parts: []client.CursorPart{{Type: "text", Text: content}},
+			Parts: []client.CursorPart{{Type: "text", Text: msg.Content}},
 			ID:    generateID(),
 			Role:  msg.Role,
 		}
@@ -114,53 +113,6 @@ func convertOpenAIToCursor(req ChatCompletionRequest) client.CursorChatRequest {
 		ID:       generateID(),
 		Messages: messages,
 		Trigger:  "submit-message",
-	}
-}
-
-func getOpenAITextContent(content any) string {
-	if content == nil {
-		return ""
-	}
-	switch v := content.(type) {
-	case string:
-		return v
-	case []interface{}:
-		var parts []string
-		for _, item := range v {
-			text := extractOpenAIContentPart(item)
-			if text != "" {
-				parts = append(parts, text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	case map[string]interface{}:
-		return extractOpenAIContentPart(v)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-func extractOpenAIContentPart(item interface{}) string {
-	switch part := item.(type) {
-	case string:
-		return part
-	case map[string]interface{}:
-		if t, ok := part["type"].(string); ok {
-			if t == "text" || t == "input_text" {
-				if text, ok := part["text"].(string); ok {
-					return text
-				}
-			}
-		}
-		if text, ok := part["text"].(string); ok {
-			return text
-		}
-		if text, ok := part["content"].(string); ok {
-			return text
-		}
-		return ""
-	default:
-		return ""
 	}
 }
 

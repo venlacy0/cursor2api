@@ -11,8 +11,6 @@ import (
 	"cursor2api/internal/handler"
 	"cursor2api/internal/logger"
 	"cursor2api/internal/token"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -33,9 +31,6 @@ func main() {
 
 	// 创建 Gin 引擎
 	r := gin.Default()
-	if cfg.MaxConcurrency > 0 {
-		r.Use(concurrencyLimit(cfg.MaxConcurrency, time.Duration(cfg.MaxQueueWaitMs)*time.Millisecond))
-	}
 
 	// ==================== 路由配置 ====================
 
@@ -71,42 +66,5 @@ func main() {
 	log.Info("服务运行在端口 %s", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Error("启动失败: %v", err)
-	}
-}
-
-func concurrencyLimit(max int, wait time.Duration) gin.HandlerFunc {
-	sem := make(chan struct{}, max)
-	return func(c *gin.Context) {
-		path := c.Request.URL.Path
-		if path == "/health" || path == "/status" || path == "/static" || strings.HasPrefix(path, "/static/") {
-			c.Next()
-			return
-		}
-
-		acquired := false
-		if wait <= 0 {
-			select {
-			case sem <- struct{}{}:
-				acquired = true
-			default:
-			}
-		} else {
-			timer := time.NewTimer(wait)
-			defer timer.Stop()
-			select {
-			case sem <- struct{}{}:
-				acquired = true
-			case <-timer.C:
-			}
-		}
-
-		if !acquired {
-			c.JSON(429, gin.H{"error": "server_busy", "message": "too many concurrent requests"})
-			c.Abort()
-			return
-		}
-
-		defer func() { <-sem }()
-		c.Next()
 	}
 }

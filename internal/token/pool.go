@@ -25,16 +25,11 @@ type Pool struct {
 	nameMap    map[string]string      // apiKey -> name (用于显示)
 	roundRobin []*TokenEntry          // 轮询 token 池
 	rrIndex    int32                  // 轮询索引
-	tokenQueue chan *TokenEntry       // 单次消费 token 队列
-	refillCh   chan struct{}          // 异步补充信号
 	client     *surf.Client
 	cfg        *config.Config
 	mu         sync.RWMutex
 	envJS      string
 	mainJS     string
-	scriptMu   sync.Mutex
-	scriptCache string
-	scriptCachedAt time.Time
 	stopChan   chan struct{}
 	nextID     int32 // 用于生成 token 名称
 	hitCount   int64 // 缓存命中次数
@@ -99,33 +94,28 @@ func (p *Pool) init() {
 	}
 	p.mainJS = string(mainJS)
 
-	if p.cfg.UseTokenPool {
-		p.tokenQueue = make(chan *TokenEntry, p.poolSize)
-		p.refillCh = make(chan struct{}, p.poolSize)
-
-		log.Info("预热 %d 个 token...", p.poolSize)
-		for i := 0; i < p.poolSize; i++ {
-			tokenStr, err := p.generateToken()
-			if err != nil {
-				log.Error("预热 token %d 失败: %v", i+1, err)
-				continue
-			}
-			name := p.generateName()
-			entry := &TokenEntry{
-				Name:      name,
-				Token:     tokenStr,
-				CreatedAt: time.Now(),
-			}
-			p.tokenQueue <- entry
-			log.Info("预热 %s 完成 (%d/%d)", name, i+1, p.poolSize)
+	// 预生成轮询 token 池
+	log.Info("预热 %d 个 token...", p.poolSize)
+	for i := 0; i < p.poolSize; i++ {
+		tokenStr, err := p.generateToken()
+		if err != nil {
+			log.Error("预热 token %d 失败: %v", i+1, err)
+			continue
 		}
-
-		go p.refillLoop()
-		log.Info("Initialized (token queue: %d)", len(p.tokenQueue))
-		return
+		name := p.generateName()
+		entry := &TokenEntry{
+			Name:      name,
+			Token:     tokenStr,
+			CreatedAt: time.Now(),
+		}
+		p.roundRobin = append(p.roundRobin, entry)
+		log.Info("预热 %s 完成 (%d/%d)", name, i+1, p.poolSize)
 	}
 
-	log.Info("Initialized (token pool disabled)")
+	// 启动后台刷新协程
+	go p.backgroundRefresh()
+
+	log.Info("Initialized (轮询池: %d)", len(p.roundRobin))
 }
 
 // preWarmToken 预热 token
@@ -185,91 +175,16 @@ func (p *Pool) refreshAllTokens() {
 
 // GetToken 获取 Token（每次生成新 token）
 func (p *Pool) GetToken(apiKey string) (string, error) {
-	if p.cfg.UseTokenPool {
-		tokenStr, err := p.getTokenFromPool()
-		if err == nil && tokenStr != "" {
-			atomic.AddInt64(&p.hitCount, 1)
-			return tokenStr, nil
-		}
-		if err != nil {
-			log.Warn("从 Token 池获取失败，回退到即时生成: %v", err)
-			atomic.AddInt64(&p.missCount, 1)
-			p.requestRefill()
-		}
-	}
-
-	// 回退：即时生成 token
+	// 每次请求生成新 token，避免被 Cursor 检测到重复使用
 	log.Debug("生成新 token...")
 	tokenStr, err := p.generateToken()
 	if err != nil {
 		log.Error("生成 token 失败: %v", err)
-		atomic.AddInt64(&p.missCount, 1)
 		return "", err
 	}
 	atomic.AddInt64(&p.hitCount, 1)
 	log.Debug("新 token 生成成功")
 	return tokenStr, nil
-}
-
-func (p *Pool) getTokenFromPool() (string, error) {
-	if p.tokenQueue == nil {
-		return "", fmt.Errorf("token queue not initialized")
-	}
-
-	select {
-	case entry := <-p.tokenQueue:
-		if entry == nil {
-			return "", fmt.Errorf("token queue empty")
-		}
-		p.requestRefill()
-
-		if entry.Token != "" && time.Since(entry.CreatedAt) < tokenExpiry {
-			entry.UseCount++
-			return entry.Token, nil
-		}
-
-		tokenStr, err := p.generateToken()
-		if err != nil {
-			return "", err
-		}
-		return tokenStr, nil
-	default:
-		return "", fmt.Errorf("token queue empty")
-	}
-}
-
-func (p *Pool) requestRefill() {
-	if p.refillCh == nil {
-		return
-	}
-	select {
-	case p.refillCh <- struct{}{}:
-	default:
-	}
-}
-
-func (p *Pool) refillLoop() {
-	for {
-		select {
-		case <-p.refillCh:
-			tokenStr, err := p.generateToken()
-			if err != nil {
-				log.Error("补充 token 失败: %v", err)
-				continue
-			}
-			entry := &TokenEntry{
-				Name:      p.generateName(),
-				Token:     tokenStr,
-				CreatedAt: time.Now(),
-			}
-			select {
-			case p.tokenQueue <- entry:
-			default:
-			}
-		case <-p.stopChan:
-			return
-		}
-	}
 }
 
 // refreshRoundRobinToken 刷新轮询池中指定索引的 token
@@ -286,7 +201,7 @@ func (p *Pool) refreshRoundRobinToken(idx int) {
 	defer entry.mu.Unlock()
 
 	// 双重检查
-	if time.Since(entry.CreatedAt) < tokenExpiry && entry.Token != "" {
+	if time.Since(entry.CreatedAt) < tokenExpiry {
 		return
 	}
 
@@ -375,7 +290,7 @@ func (p *Pool) generateToken() (string, error) {
 	}
 
 	// 获取 Cursor 脚本
-	cursorJS, err := p.getCursorScript()
+	cursorJS, err := p.fetchCursorScript()
 	if err != nil {
 		return "", fmt.Errorf("fetch cursor script: %w", err)
 	}
@@ -408,34 +323,6 @@ func (p *Pool) generateToken() (string, error) {
 	}
 
 	return strings.TrimSpace(string(output)), nil
-}
-
-func (p *Pool) getCursorScript() (string, error) {
-	ttlSeconds := p.cfg.ScriptCacheTTLSeconds
-	if ttlSeconds > 0 {
-		ttl := time.Duration(ttlSeconds) * time.Second
-		p.scriptMu.Lock()
-		if p.scriptCache != "" && time.Since(p.scriptCachedAt) < ttl {
-			script := p.scriptCache
-			p.scriptMu.Unlock()
-			return script, nil
-		}
-		p.scriptMu.Unlock()
-	}
-
-	script, err := p.fetchCursorScript()
-	if err != nil {
-		return "", err
-	}
-
-	if ttlSeconds > 0 {
-		p.scriptMu.Lock()
-		p.scriptCache = script
-		p.scriptCachedAt = time.Now()
-		p.scriptMu.Unlock()
-	}
-
-	return script, nil
 }
 
 // fetchCursorScript 获取 Cursor 验证脚本
