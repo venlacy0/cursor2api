@@ -24,6 +24,7 @@ WORKDIR /app
 # 安装 Chromium 和必要的依赖
 RUN apk add --no-cache \
     chromium \
+    nodejs \
     nss \
     freetype \
     harfbuzz \
@@ -39,6 +40,7 @@ ENV CHROME_BIN=/usr/bin/chromium-browser
 # 复制二进制文件
 COPY --from=builder /app/cursor2api .
 COPY --from=builder /app/config.yaml .
+COPY --from=builder /app/jscode ./jscode
 COPY --from=builder /app/static ./static
 
 # 创建非 root 用户
